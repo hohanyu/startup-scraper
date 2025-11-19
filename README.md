@@ -13,9 +13,17 @@ A web scraper that extracts startup information from [Startup SG](https://www.st
 
 ### 1. Install Dependencies
 
+Create a virtual environment (recommended):
+
 ```bash
+python3 -m venv venv
+source venv/bin/activate  # On macOS/Linux
+# or: venv\Scripts\activate  # On Windows
+
 pip install -r requirements.txt
 ```
+
+**Note:** On macOS, you may need to use `python3` and `pip3` instead of `python` and `pip`. If you get an "externally-managed-environment" error, use a virtual environment as shown above.
 
 ### 2. Install ChromeDriver
 
@@ -46,7 +54,10 @@ To upload data to Google Sheets, you need to set up Google Service Account crede
 
 ### Basic Usage
 
+Make sure your virtual environment is activated:
+
 ```bash
+source venv/bin/activate  # On macOS/Linux
 python main.py
 ```
 

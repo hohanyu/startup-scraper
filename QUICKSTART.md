@@ -2,8 +2,17 @@
 
 ## 1. Install Dependencies
 
+Create and activate a virtual environment:
+
 ```bash
+python3 -m venv venv
+source venv/bin/activate  # On macOS/Linux
 pip install -r requirements.txt
+```
+
+**Note:** Always activate the virtual environment before running the scraper:
+```bash
+source venv/bin/activate
 ```
 
 ## 2. Install ChromeDriver
