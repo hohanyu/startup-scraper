@@ -41,6 +41,7 @@ class StartupSGScraper:
     def get_all_startup_urls(self) -> List[str]:
         """
         Extract all startup profile URLs from the directory page
+        Handles pagination to get all profiles
         Returns list of profile URLs
         """
         print("Fetching directory page...")
@@ -49,49 +50,57 @@ class StartupSGScraper:
         # Wait for page to load and JavaScript to execute
         time.sleep(5)
         
-        # Try to find API endpoint or data in JavaScript
-        profile_urls = set()
-        
-        # Check if there's an API endpoint we can call directly
+        # Wait for pagination to appear
         try:
-            # Try to get profile IDs from JavaScript variables
-            profile_ids = self.driver.execute_script("""
-                // Look for profile data in window object
-                if (window.__NUXT__ && window.__NUXT__.data) {
-                    return window.__NUXT__.data;
-                }
-                // Look for any data structures with profile IDs
-                return null;
-            """)
+            WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.v-pagination, [class*="pagination"]'))
+            )
+        except TimeoutException:
+            print("Warning: Pagination element not found, proceeding anyway...")
+        
+        profile_urls = set()
+        current_page = 1
+        max_pages = 1000  # Safety limit
+        no_more_pages = False
+        
+        print("Extracting profile URLs from all pages...")
+        
+        while current_page <= max_pages and not no_more_pages:
+            print(f"\nProcessing page {current_page}...")
             
-            if profile_ids:
-                # Extract IDs and build URLs
-                ids = self._extract_ids_from_data(profile_ids)
-                for profile_id in ids:
-                    profile_urls.add(f"{self.base_url}/profiles/{profile_id}")
-        except Exception as e:
-            print(f"Could not extract from JavaScript: {e}")
-        
-        # Scroll to load more content (if pagination/infinite scroll)
-        last_height = self.driver.execute_script("return document.body.scrollHeight")
-        scroll_attempts = 0
-        max_scrolls = 20  # Increased for more scrolling
-        
-        print("Scrolling to load all content...")
-        while scroll_attempts < max_scrolls:
-            # Scroll down
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
+            # Wait a bit for page content to load
+            time.sleep(3)
             
-            # Check if new content loaded
-            new_height = self.driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-            scroll_attempts += 1
-            print(f"  Scroll {scroll_attempts}/{max_scrolls}, height: {new_height}")
+            # Extract profile URLs from current page
+            page_urls = self._extract_urls_from_current_page()
+            new_urls = page_urls - profile_urls
+            
+            if new_urls:
+                profile_urls.update(new_urls)
+                print(f"  Found {len(new_urls)} new profiles (total: {len(profile_urls)})")
+            else:
+                print(f"  No new profiles found on page {current_page}")
+            
+            # Try to navigate to next page
+            next_page_success = self._navigate_to_next_page()
+            
+            if not next_page_success:
+                print(f"  No more pages available")
+                no_more_pages = True
+            else:
+                current_page += 1
         
-        # Try to find all profile links in the DOM
+        # Remove duplicates and sort
+        profile_urls = sorted(list(set(profile_urls)))
+        
+        print(f"\n✓ Found {len(profile_urls)} unique profile URLs across {current_page} page(s)")
+        return profile_urls
+    
+    def _extract_urls_from_current_page(self) -> set:
+        """Extract all profile URLs from the current page"""
+        urls = set()
+        
+        # Method 1: Find all links in the DOM
         try:
             links = self.driver.find_elements(By.TAG_NAME, "a")
             for link in links:
@@ -100,32 +109,237 @@ class StartupSGScraper:
                     # Normalize URL
                     if href.startswith("/"):
                         href = f"{self.base_url}{href}"
-                    profile_urls.add(href)
+                    elif not href.startswith("http"):
+                        href = f"{self.base_url}/{href}"
+                    urls.add(href)
         except Exception as e:
-            print(f"Error finding links: {e}")
+            print(f"    Error finding links: {e}")
         
-        # Also check page source for profile URLs
-        page_source = self.driver.page_source
-        profile_pattern = r'["\']([^"\']*?/profiles/\d+)["\']'
-        matches = re.findall(profile_pattern, page_source)
-        for match in matches:
-            if match.startswith("/"):
-                match = f"{self.base_url}{match}"
-            elif not match.startswith("http"):
-                match = f"{self.base_url}/{match}"
-            profile_urls.add(match)
+        # Method 2: Extract from page source
+        try:
+            page_source = self.driver.page_source
+            profile_pattern = r'["\']([^"\']*?/profiles/\d+)["\']'
+            matches = re.findall(profile_pattern, page_source)
+            for match in matches:
+                if match.startswith("/"):
+                    match = f"{self.base_url}{match}"
+                elif not match.startswith("http"):
+                    match = f"{self.base_url}/{match}"
+                urls.add(match)
+            
+            # Also extract profile IDs
+            id_pattern = r'/profiles/(\d+)'
+            id_matches = re.findall(id_pattern, page_source)
+            for profile_id in id_matches:
+                urls.add(f"{self.base_url}/profiles/{profile_id}")
+        except Exception as e:
+            print(f"    Error extracting from page source: {e}")
         
-        # Extract profile IDs from page source
-        id_pattern = r'/profiles/(\d+)'
-        id_matches = re.findall(id_pattern, page_source)
-        for profile_id in id_matches:
-            profile_urls.add(f"{self.base_url}/profiles/{profile_id}")
-        
-        # Remove duplicates and sort
-        profile_urls = sorted(list(set(profile_urls)))
-        
-        print(f"Found {len(profile_urls)} unique profile URLs")
-        return profile_urls
+        return urls
+    
+    def _navigate_to_next_page(self) -> bool:
+        """
+        Navigate to the next page of results
+        Returns True if navigation was successful, False if no more pages
+        """
+        try:
+            # Wait a bit for pagination to be ready
+            time.sleep(1)
+            
+            # Try multiple strategies to find and click next button
+            
+            # Strategy 1: Look for "Next" button by text
+            try:
+                next_buttons = self.driver.find_elements(
+                    By.XPATH, 
+                    "//button[contains(text(), 'Next') or contains(text(), '→') or contains(text(), '>')]"
+                )
+                for btn in next_buttons:
+                    if btn.is_enabled() and btn.is_displayed():
+                        # Check if it's actually the next button (not disabled)
+                        classes = btn.get_attribute("class") or ""
+                        if "disabled" not in classes.lower():
+                            btn.click()
+                            time.sleep(3)  # Wait for page to load
+                            return True
+            except Exception as e:
+                pass
+            
+            # Strategy 2: Look for pagination component and find next button
+            try:
+                pagination = self.driver.find_element(
+                    By.CSS_SELECTOR, 
+                    '.v-pagination, [class*="pagination"]'
+                )
+                
+                # Find next button in pagination
+                next_btn = pagination.find_elements(
+                    By.CSS_SELECTOR,
+                    'button:not([disabled]), a:not([aria-disabled="true"])'
+                )
+                
+                # Look for button with arrow or "next" text, or the last enabled button
+                for btn in next_btn:
+                    text = btn.text.strip().lower()
+                    classes = btn.get_attribute("class") or ""
+                    aria_label = btn.get_attribute("aria-label") or ""
+                    
+                    # Skip if disabled
+                    if "disabled" in classes.lower() or btn.get_attribute("disabled"):
+                        continue
+                    
+                    # Check if it's a next button
+                    if any(keyword in text for keyword in ["next", "→", ">", "forward"]):
+                        btn.click()
+                        time.sleep(3)
+                        return True
+                    elif any(keyword in aria_label.lower() for keyword in ["next", "forward"]):
+                        btn.click()
+                        time.sleep(3)
+                        return True
+                
+                # Strategy 3: Click the next page number
+                # Get current page number and click next one
+                current_url = self.driver.current_url
+                page_numbers = pagination.find_elements(
+                    By.CSS_SELECTOR,
+                    'button, a'
+                )
+                
+                # Find the highest page number button that's enabled
+                max_page = 0
+                next_page_btn = None
+                
+                for btn in page_numbers:
+                    text = btn.text.strip()
+                    if text.isdigit():
+                        page_num = int(text)
+                        if page_num > max_page:
+                            classes = btn.get_attribute("class") or ""
+                            if "disabled" not in classes.lower() and btn.is_enabled():
+                                max_page = page_num
+                                next_page_btn = btn
+                
+                # If we found a higher page number, click it
+                if next_page_btn:
+                    # But first check if we're already on that page
+                    # If current page is less than max, click the next one
+                    # For now, let's try clicking the last enabled number button
+                    # Actually, better approach: find buttons with numbers and click the one after current
+                    pass
+                
+            except Exception as e:
+                pass
+            
+            # Strategy 4: Use JavaScript to find and click next (most reliable)
+            try:
+                result = self.driver.execute_script("""
+                    // Find pagination
+                    const pagination = document.querySelector('.v-pagination, [class*="pagination"]');
+                    if (!pagination) return {success: false, reason: 'no_pagination'};
+                    
+                    // Find all buttons/links
+                    const buttons = Array.from(pagination.querySelectorAll('button, a'));
+                    
+                    // First, try to find explicit "Next" button
+                    let nextButton = null;
+                    for (let btn of buttons) {
+                        const text = btn.textContent.trim().toLowerCase();
+                        const classes = btn.className || '';
+                        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                        const disabled = btn.disabled || 
+                                       classes.includes('disabled') || 
+                                       btn.getAttribute('aria-disabled') === 'true' ||
+                                       btn.classList.contains('v-pagination__prev');
+                        
+                        if (disabled) continue;
+                        
+                        // Look for next indicators
+                        if (text.includes('next') || 
+                            text === '→' || 
+                            text === '>' ||
+                            ariaLabel.includes('next')) {
+                            nextButton = btn;
+                            break;
+                        }
+                    }
+                    
+                    // If no explicit next button, find current page and click next number
+                    if (!nextButton) {
+                        let currentPage = null;
+                        const pageNumbers = [];
+                        
+                        buttons.forEach(btn => {
+                            const text = btn.textContent.trim();
+                            const classes = btn.className || '';
+                            
+                            // Check if it's a number
+                            if (/^\\d+$/.test(text)) {
+                                const num = parseInt(text);
+                                const isActive = classes.includes('v-pagination__item--active') || 
+                                               btn.getAttribute('aria-current') === 'page' ||
+                                               classes.includes('active');
+                                
+                                pageNumbers.push({num: num, button: btn, active: isActive});
+                                
+                                if (isActive) {
+                                    currentPage = num;
+                                }
+                            }
+                        });
+                        
+                        // If we found current page, click the next one
+                        if (currentPage !== null) {
+                            const nextPageNum = currentPage + 1;
+                            const nextPageBtn = pageNumbers.find(p => p.num === nextPageNum);
+                            
+                            if (nextPageBtn) {
+                                nextButton = nextPageBtn.button;
+                            } else {
+                                // Check if there are more pages available (max page > current)
+                                const maxPage = Math.max(...pageNumbers.map(p => p.num));
+                                if (currentPage >= maxPage) {
+                                    return {success: false, reason: 'last_page'};
+                                }
+                            }
+                        } else {
+                            // Can't determine current page, try clicking the last number button
+                            const sortedPages = pageNumbers.sort((a, b) => b.num - a.num);
+                            if (sortedPages.length > 0) {
+                                // Don't click the highest if we're not sure, but this is a fallback
+                                return {success: false, reason: 'cannot_determine_current_page'};
+                            }
+                        }
+                    }
+                    
+                    if (nextButton) {
+                        // Scroll into view and click
+                        nextButton.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        nextButton.click();
+                        return {success: true, method: 'clicked_next'};
+                    }
+                    
+                    return {success: false, reason: 'no_next_button_found'};
+                """)
+                
+                if result and isinstance(result, dict) and result.get('success'):
+                    time.sleep(3)  # Wait for page to load
+                    return True
+                else:
+                    # Check if we're on the last page
+                    if result and isinstance(result, dict) and result.get('reason') == 'last_page':
+                        return False
+            except Exception as e:
+                print(f"    JavaScript navigation error: {e}")
+                pass
+            
+            # Strategy 5: Check if URL changed (might be using query params)
+            # If we're still on the same URL after trying to click, assume no more pages
+            return False
+            
+        except Exception as e:
+            print(f"    Error navigating to next page: {e}")
+            return False
     
     def _extract_ids_from_data(self, data) -> List[str]:
         """Recursively extract profile IDs from nested data structures"""
